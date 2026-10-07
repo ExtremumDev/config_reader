@@ -12,22 +12,31 @@
 
 #define READ_BUFFER_SIZE 10
 
+#define BASE_ARRAY_SIZE 1
+
 enum reader_states{
     init,
     lvalue,
     equal,
     rvalue_start,
+    next_arr_el,
     string_value,
     error
 };
 
+struct array_skeleton{
+    char **list;
+    size_t next_idx;
+    size_t size;
+};
+
 struct reader_fsm{
     enum reader_states state;
-    char quotes_fl;
+    char *buffer;
     size_t buffer_pointer;
     size_t current_buffer_size;
-    size_t arr_idx;
-    size_t array_size;
+    struct array_skeleton current_array;
+    char arr_el_quote;
 };
 
 /* Temporary configuration structure(exists only in parsing time)*/
@@ -35,6 +44,36 @@ struct config {
     struct setting *first_config_el;
     struct setting *last_config_el;
 };
+
+void create_arr(struct array_skeleton *a){
+    a->arr = malloc(sizeof(char *) * BASE_ARRAY_SIZE);
+    a->size = BASE_ARRAY_SIZE;
+    a->next_idx = 0;
+}
+
+void add_to_arr(struct array_skeleton *a, char *new_val)
+{
+    a->arr[a->next_idx] = new_val;
+    a->next_idx++;
+    if(a->next_idx >= a->size){
+        char **new_arr = malloc(sizeof(char*) * (a->size + 10));
+        memcpy(new_arr, a->arr, a->next_idx * sizeof(char*));
+        free(a->arr);
+        a->arr = new_arr;
+    }
+
+}
+
+void prepare_arr(struct array_skeleton *a)
+{
+    if(a->next_idx + 1 != a->size){
+        char **res_arr = malloc(sizeof(char*) * (a->next_idx + 1));
+        memcpy(res_arr, a->arr, a->next_idx * sizeof(char*));
+        free(a->arr);
+        a->arr = res_arr;
+    }
+    a->arr[a->next_idx] = NULL;
+}
 
 struct setting *create_config_el(struct config *conf){
     struct setting *new_el = malloc(sizeof(struct setting));
@@ -54,6 +93,13 @@ struct setting *create_config_el(struct config *conf){
 
     conf->last_config_el = new_el;
     return new_el;
+}
+
+void create_buffer(struct reader_fsm *fsm, size_t base_size)
+{
+    fsm->buffer = malloc(base_size);
+    fsm->buffer_pointer = 0;
+    fsm->current_buffer_size = base_size;
 }
 
 void prepare_string_value(char **value_buf, size_t value_size, size_t buf_size) // Value size: character size + zero byte
@@ -95,8 +141,12 @@ int process_config(char const *buffer, size_t buf_size, struct config *conf, str
                 }
 
                 if(buffer[i] == ' ' || buffer[i] == '\t'){
+                    prepare_string_value(
+                        &(conf->last_config_el->key),
+                        fsm->buffer_pointer,
+                        MAX_KEY_LENGTH + 1
+                    );
                     fsm->state = equal;
-                    conf->last_config_el->key[fsm->buffer_pointer] = 0;
                     continue;
                 }
 
@@ -106,12 +156,8 @@ int process_config(char const *buffer, size_t buf_size, struct config *conf, str
                         fsm->buffer_pointer,
                         MAX_KEY_LENGTH + 1
                     );
-                    fsm->state = string_value;
-                    conf->last_config_el->key[fsm->buffer_pointer] = 0;
-                    fsm->current_buffer_size = BASE_VALUE_BUFFER_SIZE;
+                    fsm->state = rvalue_start;
 
-                    fsm->buffer_pointer = 0;
-                    conf->last_config_el->value = malloc(BASE_VALUE_BUFFER_SIZE);
                     continue;
                 }
 
@@ -137,16 +183,43 @@ int process_config(char const *buffer, size_t buf_size, struct config *conf, str
                 }
 
                 if(buffer[i] == '='){
-                    fsm->buffer_pointer = 0;
-                    fsm->state = string_value;
-                    fsm->current_buffer_size = BASE_VALUE_BUFFER_SIZE;
-
-                    conf->last_config_el->value = malloc(BASE_VALUE_BUFFER_SIZE);
+                    fsm->state = rvalue_start;
                     continue;
                 }
 
                 // Not space character and not equal char -> error
 
+            case rvalue_start:
+                if(buffer[i] == ' ' || buffer[i] == '\t'){
+                    continue;
+                }
+                if(buffer[i] == '\n'){
+                    fsm->state = error;
+                    continue;
+                }
+                if(buffer[i] == '('){
+                   conf->last_config_el->type = list; 
+                   create_array(&(fsm->current_array));
+                }
+
+                if(buffer[i] == '"' || buffer[i] == '\''){
+                    fsm->arr_el_quote = buffer[i];
+                    fsm->state = string_value;
+                    continue;
+                }
+                
+                break;
+            case next_arr_el:
+                if(buffer[i] == '"' || buffer[i] == '\''){
+                    fsm->arr_el_quote = buffer[i];
+                    fsm->state = string_value;
+                }
+                if(buffer[i] == ')'){
+                    prepare_array(fsm->current_array);
+
+                    fsm->state = init;
+                }
+                continue;
             case string_value:
                 if(buffer[i] == '\n'){
                     prepare_string_value(
